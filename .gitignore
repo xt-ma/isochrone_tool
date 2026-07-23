@@ -1,0 +1,34 @@
+# ===== Python 环境 / 缓存 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# ===== 密钥 / 凭证（切勿提交！） =====
+.env
+.env.*
+!.env.example
+
+# 真实配置文件（含实际坐标，注意隐私，勿提交；示例配置 *.example.json 可正常提交）
+*.json
+!*example.json
+
+# ===== 运行生成的产物（可重新生成，不入库） =====
+durations.csv
+durations*.meta.json
+*.html
+*.geojson
+from_dxh/
+to_dxh/
+
+# ===== 工具内部元数据 =====
+.workbuddy/
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

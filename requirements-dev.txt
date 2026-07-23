@@ -1,0 +1,3 @@
+# 开发/测试依赖（不影响运行期）
+pytest>=8.0
+pytest-asyncio>=0.23

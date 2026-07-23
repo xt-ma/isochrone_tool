@@ -1,0 +1,14 @@
+{
+  "origin": [114.154551,30.628994],
+  "aoi": {
+    "type": "circle",
+    "radius_km": 15
+  },
+  "cell_deg": 0.0028,
+  "grid_deg": 0.0006,
+  "interval": 5,
+  "max_minutes": null,
+  "cmap": "YlOrRd",
+  "basemap": "voyager",
+  "direction": "from"
+}
