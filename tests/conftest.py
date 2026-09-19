@@ -9,8 +9,6 @@ tmp csv 路径等。
   故用 monkeypatch 把 `aiohttp.ClientSession` 替换成返回 FakeSession 的工厂，
   即可在不触网的情况下驱动整条批量算路 / 续跑 / 指纹分支逻辑。
 """
-import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -21,8 +19,6 @@ from shapely.geometry import Polygon
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-import isochrone  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

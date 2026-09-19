@@ -1,5 +1,4 @@
 """坐标换算回归：bd09<->wgs84 往返、已知样例量级、境外分支（不纠偏）。"""
-import pytest
 
 import isochrone
 

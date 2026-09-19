@@ -1,5 +1,4 @@
 """渔网生成回归：确定性、矩形/带洞/圆形点数正确。"""
-import pytest
 from shapely.geometry import Polygon
 
 import isochrone

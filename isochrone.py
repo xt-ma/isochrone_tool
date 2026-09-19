@@ -1008,7 +1008,7 @@ def build_from_csv(
 # 模拟数据（无 AK 也能演示，验证几何/插值/出图）
 # --------------------------------------------------------------------------- #
 def synthetic_durations(gdf, origin, seed=42):
-    from math import radians, sin, cos, asin, sqrt
+    from math import asin, cos, radians, sin, sqrt
 
     rng = np.random.default_rng(seed)
 

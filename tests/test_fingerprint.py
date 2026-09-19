@@ -1,8 +1,6 @@
 """配置指纹回归：敏感性 / 稳定性 / 不变性 / 12 位 hex。"""
 import inspect
 
-import pytest
-
 import isochrone
 from tests.conftest import SAMPLE_ORIGIN, SAMPLE_POLYGON
 

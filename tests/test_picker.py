@@ -1,4 +1,4 @@
-"""picker.py 回归：P1-1 改动——webbrowser.open 失败时打印手动打开提示，
+"""picker.py 回归：生成的 HTML 有效；webbrowser.open 失败时打印手动打开提示，
 而非抛异常中断。
 
 通过 runpy 以 __main__ 方式真实执行 picker.py 的入口块，
@@ -6,8 +6,6 @@
 """
 import runpy
 import sys
-
-import pytest
 
 import picker  # 确保可导入（项目根在 sys.path 上）
 
