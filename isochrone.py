@@ -669,6 +669,138 @@ def _add_legend(m, title, bands):
 
 
 # --------------------------------------------------------------------------- #
+# 4b) 矢量等时圈导出（GeoJSON）：与地图色面同一套分级
+# --------------------------------------------------------------------------- #
+def _split_path_rings(pts, codes):
+    """matplotlib 风格 compound path (顶点, codes) -> 闭合环坐标数组列表。
+
+    codes=1 (MOVETO) 开启新环，79 (CLOSEPOLY) 为收尾占位点（与环首重复）；
+    去掉占位点后每个环首尾若不重合则补上首点。
+    """
+    pts = np.asarray(pts, dtype=float)
+    codes = np.asarray(codes)
+    rings = []
+    starts = np.where(codes == 1)[0]
+    for k, s in enumerate(starts):
+        e = starts[k + 1] if k + 1 < len(starts) else len(pts)
+        seg = pts[s:e]
+        if len(codes[s:e]) > 0 and codes[s + len(seg) - 1] == 79:
+            seg = seg[:-1]  # 去掉 CLOSEPOLY 占位
+        if len(seg) < 3:
+            continue
+        if not np.allclose(seg[0], seg[-1]):
+            seg = np.vstack([seg, seg[:1]])
+        rings.append(seg)
+    return rings
+
+
+def _rings_to_polygons(rings):
+    """一组闭合环 -> shapely Polygon 列表（自动识别洞）。
+
+    用环之间的包含嵌套深度判定角色：深度偶数为外环、奇数为洞，洞归入
+    包含它的「深度小 1」的外环。不依赖环的绕向约定，对任意嵌套
+    （含洞中岛）都成立。
+    """
+    polys = []
+    for arr in rings:
+        p = Polygon(np.asarray(arr, dtype=float))
+        if p.is_empty or not p.is_valid or p.area <= 0:
+            continue
+        polys.append(p)
+    if not polys:
+        return []
+
+    # 用每个环的首顶点判定包含深度：环自身的顶点不会严格落入自身内部
+    # （contains 为严格包含），天然排除自身；洞环的顶点必严格落在其父环
+    # 内部。不能用 representative_point——外环的代表点可能恰好落进自己的
+    # 洞里，导致深度错乱、洞被误判为外环。
+    depth = []
+    for i, pi in enumerate(polys):
+        v = Point(pi.exterior.coords[0])
+        depth.append(sum(1 for j, pj in enumerate(polys)
+                         if j != i and pj.contains(v)))
+    # 每个洞（奇数深度）的唯一父环：深度恰小 1 且包含其顶点的环
+    parent = {}
+    for j in range(len(polys)):
+        if depth[j] % 2 == 0:
+            continue
+        v = Point(polys[j].exterior.coords[0])
+        for i in range(len(polys)):
+            if depth[i] == depth[j] - 1 and polys[i].contains(v):
+                parent[j] = i
+                break
+    out = []
+    for i in range(len(polys)):
+        if depth[i] % 2 != 0:
+            continue
+        holes = [polys[j].exterior.coords for j in parent if parent[j] == i]
+        out.append(Polygon(polys[i].exterior, holes))
+    return out
+
+
+def export_isochrone_geojson(
+    XI,
+    YI,
+    zz,
+    out_path: str,
+    interval: float = 5.0,
+    max_minutes=None,
+    direction: str = "from",
+) -> int:
+    """把分级等时圈导出为矢量 GeoJSON（WGS84 / EPSG:4326），返回要素数。
+
+    与地图色面同一套分级：中间档为 [lo, hi)，最后一档为 ≥ lo（与图例
+    『≥ N 分钟』一致）。用 contourpy（matplotlib 的等值面内核，本就随
+    matplotlib 安装）抽取各档边界环；NaN（研究区外）不参与构面。
+    每个多边形一个 Feature，properties.minutes 为图例同款标注。
+    """
+    valid = zz[~np.isnan(zz)]
+    if valid.size == 0:
+        logger.warning("没有有效数据，跳过等时圈 GeoJSON 导出。")
+        return 0
+    vmax = float(max_minutes) if max_minutes is not None else float(np.nanmax(zz))
+    bounds = np.arange(0.0, vmax + interval, interval)
+    if len(bounds) < 2:
+        bounds = np.array([0.0, vmax + interval])
+    gen = contourpy.contour_generator(
+        x=XI, y=YI, z=zz, fill_type=contourpy.FillType.OuterCode
+    )
+
+    features = []
+    n_bands = len(bounds) - 1
+    for i in range(n_bands):
+        lo = float(bounds[i])
+        last = i == n_bands - 1
+        upper = float(np.nanmax(zz)) + interval if last else float(bounds[i + 1])
+        label = f"≥ {lo:.0f} 分钟" if last else f"{lo:.0f}–{bounds[i + 1]:.0f} 分钟"
+        # OuterCode 模式下 filled() 返回 (顶点数组, codes 数组)，按多边形逐项对应；
+        # 空档位（该档无区域）返回长度为 0 的数组，zip 自然跳过
+        verts, cdss = gen.filled(lo, upper)
+        polys = []
+        for pts, codes in zip(verts, cdss):
+            polys.extend(_rings_to_polygons(_split_path_rings(pts, codes)))
+        for p in polys:
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "minutes": label,
+                    "lower_min": round(lo, 1),
+                    "upper_min": None if last else round(float(bounds[i + 1]), 1),
+                    "direction": direction,
+                },
+                "geometry": mapping(p),
+            })
+
+    Path(out_path).write_text(
+        json.dumps({"type": "FeatureCollection", "features": features},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("等时圈矢量已导出: %s（%d 个要素）", out_path, len(features))
+    return len(features)
+
+
+# --------------------------------------------------------------------------- #
 # 流程组装
 # --------------------------------------------------------------------------- #
 def build_isochrone(
@@ -683,15 +815,27 @@ def build_isochrone(
     max_minutes=None,
     basemap: str = "voyager",
     direction: str = "from",
+    export_geojson: bool = False,
 ):
-    """用已有含 duration_min 的 gdf 直接插值出图。"""
+    """用已有含 duration_min 的 gdf 直接插值出图；export_geojson 时一并导出矢量。"""
     if gdf is None:
         gdf = make_fishnet(polygon, cell_deg=cell_deg)
-    XI, YI, zz = idw_grid(gdf, grid_deg=grid_deg)
-    zz = mask_by_polygon(XI, YI, zz, polygon)
+    if len(gdf) == 0:
+        # 零有效点：跳过插值（空 gdf 的 total_bounds 全 NaN，idw_grid 会崩溃），
+        # 交一个 1x1 全 NaN 栅格给 render_map，走其「仅输出底图」分支。
+        XI = YI = np.zeros((1, 1))
+        zz = np.full((1, 1), np.nan)
+    else:
+        XI, YI, zz = idw_grid(gdf, grid_deg=grid_deg)
+        zz = mask_by_polygon(XI, YI, zz, polygon)
     render_map(origin, polygon, XI, YI, zz, out_html=out_html,
                interval=interval, cmap_name=cmap_name, max_minutes=max_minutes,
                basemap=basemap, direction=direction)
+    if export_geojson:
+        export_isochrone_geojson(
+            XI, YI, zz, str(Path(out_html).with_suffix(".geojson")),
+            interval=interval, max_minutes=max_minutes, direction=direction,
+        )
     return gdf
 
 
@@ -712,8 +856,9 @@ def run_pipeline(
     origin_bd=None,
     force: bool = False,
     delay: float = 3.0,
+    export_geojson: bool = False,
 ):
-    """完整管线：渔网 -> 百度批量算路 -> 插值 -> 裁剪 -> 出图。"""
+    """完整管线：渔网 -> 百度批量算路 -> 插值 -> 裁剪 -> 出图（可选导出矢量）。"""
     ak = baidu_ak or load_ak()
     gdf_raw = make_fishnet(polygon, cell_deg=cell_deg)
     n_total = len(gdf_raw)
@@ -731,11 +876,9 @@ def run_pipeline(
                 n_valid, n_total, 100.0 * n_valid / max(n_total, 1))
     if n_valid == 0:
         logger.error(
-            "没有任何有效采样点！百度批量算路几乎全部失败，常见原因：\n"
-            "  1) BAIDU_AK 不是『服务端(Server)』类型（浏览器端 AK 调服务端接口会被拒）；\n"
-            "  2) AK 配额(每日5000)已用尽或 IP 白名单未放行本机出口 IP；\n"
-            "  3) 起点/研究区坐标不在百度服务范围（需在中国境内）。\n"
-            "请查看上方 '百度返回错误 status=...' 的 WARNING 日志定位具体原因。"
+            "没有任何有效采样点！百度批量算路几乎全部失败，常见原因：\n%s\n"
+            "请查看上方 '百度返回错误 status=...' 的 WARNING 日志定位具体原因。",
+            _AK_TROUBLESHOOT,
         )
     elif n_valid < 3:
         logger.warning(
@@ -745,6 +888,7 @@ def run_pipeline(
         origin, polygon, gdf=gdf, cell_deg=cell_deg, grid_deg=grid_deg,
         out_html=out_html, interval=interval, cmap_name=cmap_name,
         max_minutes=max_minutes, basemap=basemap, direction=direction,
+        export_geojson=export_geojson,
     )
     return gdf
 
