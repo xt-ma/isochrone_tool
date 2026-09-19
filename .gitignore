@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+.coverage
 
 # ===== 密钥 / 凭证（切勿提交！） =====
 .env
@@ -21,11 +22,6 @@ durations.csv
 durations*.meta.json
 *.html
 *.geojson
-from_dxh/
-to_dxh/
-
-# ===== 工具内部元数据 =====
-.workbuddy/
 
 # ===== 系统 / 编辑器 =====
 .DS_Store

@@ -16,10 +16,11 @@ picker.py — 交互式选点器（生成 picker.html）
 说明：本工具统一使用百度坐标系，故 picker 在导出时把 OSM 拾取到的 WGS84 转成 BD-09。
 （圆形研究区仍需在 config 里手动写 "aoi":{"type":"circle","radius_km":...}，picker 只产出多边形。）
 """
+import os
+import webbrowser
+
 import folium
 from folium.plugins import Draw
-import webbrowser
-import os
 
 CENTER = [30.2527, 120.2098]  # 默认杭州，可改
 
@@ -125,7 +126,8 @@ def build_picker(center=CENTER, out="picker.html"):
     return out
 
 
-if __name__ == "__main__":
+def main():
+    """CLI 入口：解析参数、生成 picker.html 并尝试自动打开浏览器。"""
     import argparse
 
     p = argparse.ArgumentParser(description="交互式选点器：绘制研究区与起点，导出 config 片段")
@@ -141,3 +143,7 @@ if __name__ == "__main__":
     except Exception:
         abs_path = os.path.abspath(f)
         print(f"[提示] 无法自动打开浏览器，请手动打开文件：{abs_path}")
+
+
+if __name__ == "__main__":
+    main()
