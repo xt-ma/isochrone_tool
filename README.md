@@ -19,6 +19,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+可选：`pip install -e .` 把本工具安装为命令行命令，之后可直接用 `isochrone` / `picker`
+代替 `python isochrone.py` / `python picker.py`（参数完全相同）。
+
 ## 准备百度 AK
 
 算路依赖百度地图开放平台的服务，需要一个服务端 AK：
@@ -35,8 +38,9 @@ pip install -r requirements.txt
 
 所有坐标都用**百度坐标系 BD-09**，格式为 `[经度, 纬度]`（先经度后纬度），和百度坐标拾取器一致：
 
-- 获取坐标：打开 https://api.map.baidu.com/lbsapi/getpoint/index.html ，在地图上点目标点，
-  左下角显示的 `经度,纬度` 用百度坐标拾取器取的点本就是 BD-09，**无需任何换算**，直接填进 config 的 `origin` / `polygon` 即可。
+- 获取坐标：打开百度坐标拾取器 https://api.map.baidu.com/lbsapi/getpoint/index.html ，
+  在地图上点目标点，左下角显示的 `经度,纬度` 就是 BD-09 坐标，**无需任何换算**，
+  直接填进 config 的 `origin` / `polygon` 即可。
 - 多边形研究区：按顺序给出一圈顶点 `[[经度,纬度], ...]`，首尾可重复（自动闭合）。
 
 ### 坐标系与换算说明（务必读完）
@@ -55,8 +59,8 @@ pip install -r requirements.txt
 # 用示例配置跑（不需要 AK，用模拟时间验证出图效果）
 python isochrone.py --config config.example.json --demo --out demo.html
 
-# 接百度真实路况正式出图
-python isochrone.py --config config.example.json --out isochrone.html
+# 接百度真实路况正式出图（--open：完成后自动在浏览器打开）
+python isochrone.py --config config.example.json --out isochrone.html --open
 ```
 
 打开生成的 `isochrone.html` 即可看到等时圈。
@@ -85,6 +89,8 @@ python isochrone.py --config tasks/hangzhou_westlake/config.json
 - **指纹不一致**（origin / 研究区 / 网格 / 驾车策略中任一项变了）：
   会**交互询问**你是否确认覆盖旧数据并重新算路；回答 `y` 才继续，否则退出、不改动任何文件。
   非交互环境（如后台脚本）下默认中止。想跳过询问直接覆盖，加 `--force`（慎用）。
+- **连续失败熔断**：连续 3 批算路整批失败（每批已自动重试）会立即中止并给出排查建议，
+  避免 AK 配置错误时空跑全部批次；已落盘的数据不受影响，修复后重跑同一命令即可续算。
 
 > 在根目录直接放一份 `config.json` 运行也没问题，只是不同任务若都用同名
 > `config.json`/`durations.csv`，切换任务时会触发上面的指纹不一致提示，
@@ -117,8 +123,9 @@ python isochrone.py --config config.example.json --from-csv \
 - csv 的 `oid` 与坐标的对应由「当前 polygon + cell_deg 确定性生成的渔网」决定，
   因此**必须用与生成 csv 时相同的 origin / polygon / cell_deg / tactics** 来出图，否则
   oid 错位、旧时长被错配到新坐标，得到错误但看起来正常的等时圈。工具写入 csv 时会
-  一并保存参数指纹（含上述四项），续跑 / 离线出图时自动比对；指纹不一致会直接报错
-  （可用 `--force` 强行继续，但不保证正确）。纯渲染参数（`grid_deg` / `interval` /
+  一并保存参数指纹（含上述四项），续跑 / 离线出图时自动比对；指纹不一致会交互询问
+  是否仍要出图（默认取消、不修改任何文件，与算路模式同一确认逻辑），回答 `y` 或加
+  `--force` 才继续，但结果可能不准确。纯渲染参数（`grid_deg` / `interval` /
   `cmap` / `basemap` / `max_minutes`）不参与指纹，改这些不影响数据、可安全复用。
 
 ## 交互式选点器（picker.py，免手填坐标）
@@ -157,6 +164,7 @@ python picker.py --out my_picker.html  # 指定输出文件名
 | `cmap` | 配色方案 | 默认 `YlOrRd`（浅黄→红，越远越久），可换 `viridis` 等。 |
 | `basemap` | 底图样式 | 默认 `voyager`（浅底+地名/POI 标注）；`positron`（极简浅底）；`osm`（彩色完整）。 |
 | `tactics` | 百度驾车策略 | 10/11/12/13，默认 11（含实时路况）。改动会使 durations.csv 指纹失效，触发整份重算。 |
+| `export_geojson` | 矢量导出 | `true` 时同时导出分级等时圈 GeoJSON（详见下文「矢量等时圈导出」）。 |
 
 除 `origin` / `polygon` / `aoi` 外，其余字段都有默认值，可只写需要改的。
 
@@ -166,6 +174,7 @@ python picker.py --out my_picker.html  # 指定输出文件名
 `--from-csv`（从已有 durations.csv 直接出图，不调百度）、`--tactics`（百度驾车策略，默认 11 含路况）、
 `--csv`（结果缓存文件）、`--out`（输出 HTML）、`--cell` / `--grid` / `--interval` / `--max-minutes` / `--cmap` / `--basemap`、
 `--delay`（请求间隔秒，默认 3；频繁遇 401 并发超限可调大）、
+`--export-geojson`（同时导出分级等时圈矢量 GeoJSON）、`--open`（出图完成后自动在浏览器打开）、
 `--force`（指纹校验失败时跳过确认、直接覆盖旧数据，慎用）、`--demo`（模拟数据）。
 其中 `--out` / `--csv` 不指定时，默认落到 **config 文件所在目录**。
 
@@ -194,16 +203,17 @@ python isochrone.py --config config.circle.example.json --out isochrone_circle.h
 
 ### 规模与时耗估算
 
-圆形研究区的采样点数量近似 `π × (半径 / 格点间距)²`：`cell_deg` 越小、采样越密，点数越多、越慢。
+圆形研究区的采样点数量近似「圆面积 / 单格面积」：默认 `cell_deg=0.0028` 在杭州纬度下
+约 300 米一格（单格约 0.083 km²），`cell_deg` 越小、采样越密，点数越多、越慢。
 下表以 `batch_size=50`、`delay=3s`、**串行** 估算（免费 AK 约 1 QPS）：
 
 | 半径 | 约采样点数 | 批数(每批50) | 纯算路耗时(≈批数×delay) |
-| 1 km | ~314   | 7   | ~21 s            |
-| 2.5km| ~1963  | 40  | ~120 s           |
-| 5 km | ~7854  | 158 | ~474 s(~8 min)   |
+| 1 km | ~38   | 1  | ~3 s   |
+| 2.5km| ~236  | 5  | ~15 s  |
+| 5 km | ~945  | 19 | ~1 min |
 
-> 点数 ≈ π × (半径 / 格点间距)²，`cell_deg` 越小点数越多；若日志频繁出现 `百度并发超限 status=401`，
-> 把 `--delay` 调大（如 `--delay 5`）即可缓解，此时耗时按「批数 × delay」线性增加。
+> 若日志频繁出现 `百度并发超限 status=401`，把 `--delay` 调大（如 `--delay 5`）即可缓解，
+> 此时耗时按「批数 × delay」线性增加。
 
 ## 等时圈方向：出发 vs 到达
 
@@ -226,6 +236,20 @@ python isochrone.py --config config.circle.example.json --out isochrone_to.html
 `to` 模式下地图中心标记为蓝色「终点」，图例标注「到达该点的时间」。
 `from` 与 `to` 结果分别缓存、互不覆盖，都支持断点续跑。
 
+## 矢量等时圈导出（GeoJSON）
+
+加 `--export-geojson`（或 config 里 `"export_geojson": true`）时，出图的同时会把分级等时圈
+导出为矢量文件，与输出 HTML 同名、后缀 `.geojson`：
+
+```bash
+python isochrone.py --config config.example.json --export-geojson --out isochrone.html
+```
+
+- 坐标系 WGS84（EPSG:4326），可直接拖入 QGIS / ArcGIS 做叠加分析或专题制图；
+- 每个分级一个或多个 Feature（Polygon），`properties.minutes` 为图例同款标注
+  （如 `5–10 分钟`、`≥ 30 分钟`），`lower_min` / `upper_min` 为数值上下限（最后一档上限为 null）；
+- 分级面与地图色面出自同一套等值面算法（contourpy），外环 / 洞 / 洞中岛均已正确构面。
+
 ## 输出文件
 
 - `isochrone.html`：可交互等时圈地图（含中心标记、研究区、分级色面）。
@@ -238,18 +262,20 @@ python isochrone.py --config config.circle.example.json --out isochrone_to.html
   - 用途：拿这两对百度坐标即可在百度地图/算路里核对返回时间是否正确（例如验证
     `(origin_lng,origin_lat)` → `(dest_lng,dest_lat)` 的驾车时长是否等于本行 `duration_min`）。
 - `durations.meta.json`：参数指纹等元数据（oid→坐标对应的校验依据），一般无需手动查看。
+- `isochrone.geojson`：分级等时圈矢量（加 `--export-geojson` 或 config 设 `export_geojson` 时生成），WGS84 坐标。
 
 ## 地图样式
 
 - **底图**：默认浅色 `voyager`（含小区/学校/公园等地名与 POI 标注）；想更干净可用 `positron`。
 - **图例**：右下角自动生成颜色图例，标明「什么颜色 = 多少分钟」，与色面同一套分级。
 - **配色**：默认 `YlOrRd`（浅黄=近、深红=远），可用 `--cmap` 或 config 的 `cmap` 更换。
-- **断点续跑**：`durations.csv` 每批算完即落盘；中途退出或额度用尽后，再次运行同一配置会自动跳过已有点、只补算剩余，**不重复消耗配额**。
+- **视野**：打开地图自动缩放（fit_bounds）到研究区范围，大范围研究区不必手动缩放。
+- **断点续跑**：`durations.csv` 每批算完即原子落盘；中途退出或额度用尽后，再次运行同一配置会自动跳过已有点、只补算剩余，**不重复消耗配额**。
 
 ## 常见问题与排查（Troubleshooting / FAQ）
 
-- **频繁 `百度并发超限 status=401`**：免费 AK 约 1 QPS。请先用修复后的版本（确保其支持 `--delay`），
-  再调大间隔：`python isochrone.py --config xxx.json --delay 5`。若持续 401 不缓解，检查 AK 类型——
+- **频繁 `百度并发超限 status=401`**：免费 AK 约 1 QPS。请调大间隔：
+  `python isochrone.py --config xxx.json --delay 5`。若持续 401 不缓解，检查 AK 类型——
   必须是「**服务端**」类型；并确认当日配额(5000)未用尽、本机出口 IP 已在百度控制台的 **IP 白名单** 放行。
 - **出图空白 / 采样点过少**：多半是百度算路失败（AK 类型不对、配额耗尽、IP 白名单未放行），
   看上方 `百度返回错误 status=...` 的 WARNING 日志定位；或先 `--demo` 验证几何/出图流程本身正常。
@@ -258,6 +284,14 @@ python isochrone.py --config config.circle.example.json --out isochrone_to.html
 - **`ModuleNotFoundError`**：venv 未激活或依赖未装。先 `.venv\Scripts\activate`（Windows），
   再 `pip install -r requirements.txt`。
 - **无 AK 想先试跑**：加 `--demo`，用模拟数据验证出图效果（不需要百度 AK）。
+
+## 已知限制
+
+- **出行方式**：目前仅支持驾车（百度批量算路 routematrix/driving）；步行 / 骑行 / 公交需接入其他接口，暂未支持。
+- **路况时效**：`tactics=11` 反映的是**查询时刻的实时路况**，百度不提供「未来某时刻出发」的预测算路，
+  因此无法直接模拟「早高峰出发」等场景；如需近似对比，可在不同时段各跑一次。
+- **插值平滑**：IDW 插值天生平滑，跨河、高速封闭等「屏障效应」会被抹平，等时圈边缘请作趋势参考。
+- **在线底图**：生成的 HTML 依赖在线瓦片服务（CARTO / OSM），离线打开时只有等时圈色面、没有底图。
 
 ## 参考与致谢
 

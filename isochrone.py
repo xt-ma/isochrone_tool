@@ -122,7 +122,7 @@ def _config_fingerprint(origin, polygon, cell_deg, tactics):
 def make_fishnet(polygon: Polygon, cell_deg: float = 0.0028, offset: float = 0.001):
     """
     在研究区多边形内生成渔网中心点。
-    cell_deg 默认 0.0028（约杭州纬度下 100 米），与原文一致。
+    cell_deg 默认 0.0028（纬向约 300 米；经向随纬度略缩短），与原文一致。
     返回 GeoDataFrame，含 oid / lat / lon / geometry(Point(lon,lat))。
     """
     minx, miny, maxx, maxy = polygon.bounds  # x=lon, y=lat
