@@ -5,8 +5,9 @@ isochrone.py — 开源等时圈绘制工具（无需 ArcGIS Pro）
   - CreateFishnet + Clip  -> make_fishnet()         (shapely/geopandas)
   - 写入 time 属性        -> GeoDataFrame 直接操作
   - arcpy.sa.Idw 插值     -> idw_grid()             (scipy cKDTree + 反距离权重)
-  - Clip 裁剪             -> mask_by_polygon()      (matplotlib.path)
+  - Clip 裁剪             -> mask_by_polygon()      (shapely contains_xy，支持带洞多边形)
   - 分级配色出图          -> render_map()           (folium 可交互 HTML 地图)
+  - 分级面矢量导出        -> export_isochrone_geojson() (contourpy，可选)
 
 算路部分沿用原文的「百度批量算路 API」(routematrix/v2)，含真实路况，与 ArcGIS 无关。
 
@@ -16,35 +17,61 @@ isochrone.py — 开源等时圈绘制工具（无需 ArcGIS Pro）
 
 from __future__ import annotations
 
-import os
-import asyncio
-import math
-import json
 import argparse
+import asyncio
+import hashlib
+import json
 import logging
+import math
+import os
+import webbrowser
 from pathlib import Path
 
+import aiohttp
+import contourpy
+import folium
+import geopandas as gpd
+import matplotlib
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-
-import geopandas as gpd
-from shapely.geometry import Point, Polygon
-
-import matplotlib
+from scipy.spatial import cKDTree
+from shapely import contains_xy
+from shapely.geometry import Point, Polygon, mapping
+from tqdm import tqdm
 
 matplotlib.use("Agg")  # 无界面环境安全
-import matplotlib.pyplot as plt
-import matplotlib.path as mpath
-import matplotlib.colors as mcolors
-import folium
-from scipy.spatial import cKDTree
-import aiohttp
+import matplotlib.colors as mcolors  # noqa: E402
 
 logger = logging.getLogger("isochrone")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BAIDU_URL = "https://api.map.baidu.com/routematrix/v2/driving"
+
+# 底图瓦片源（直接指定 URL，避免依赖 folium 内置名称匹配）
+_TILES = {
+    "positron": (
+        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        "© OpenStreetMap contributors © CARTO",
+        "CartoDB Positron（浅色极简）",
+    ),
+    "voyager": (
+        "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        "© OpenStreetMap contributors © CARTO",
+        "CartoDB Voyager（浅色+地名/POI 标注）",
+    ),
+    "osm": (
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "© OpenStreetMap contributors",
+        "OpenStreetMap（彩色完整）",
+    ),
+}
+
+# 百度算路持续失败时的排查提示（连续失败熔断与零有效点告警共用一套文案）
+_AK_TROUBLESHOOT = (
+    "  1) BAIDU_AK 不是『服务端(Server)』类型（浏览器端 AK 调服务端接口会被拒）；\n"
+    "  2) AK 配额(每日5000)已用尽或 IP 白名单未放行本机出口 IP；\n"
+    "  3) 起点/研究区坐标不在百度服务范围（需在中国境内）。"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +105,6 @@ def _config_fingerprint(origin, polygon, cell_deg, tactics):
     oid 顺序就错位，旧时长会被悄悄错配到新坐标。指纹在写入时一并保存，
     续跑 / 离线出图时比对，避免静默产出错误等时圈。
     """
-    import hashlib
     h = hashlib.md5()
     if origin is not None:
         # 用 WGS84 坐标（几何/算路的实际空间），6 位小数足够且稳定
@@ -434,31 +460,20 @@ def render_map(
       - positron : CartoDB Positron，极简浅底、基本无 POI 标注
       - osm      : OpenStreetMap，彩色完整底图（含绿地/水域填色，可能抢色）
     默认配色 YlOrRd：短时长浅黄、长时长红，符合"越远越久"直觉（可改用 viridis 等）。
+    叠加图像的地理范围取 XI/YI 的实际栅格范围（而非研究区 bounds）：有效采样点
+    不足研究区边缘时二者不同，若错用研究区 bounds 会把整幅色面拉伸错位。
+    打开地图时自动缩放（fit_bounds）到研究区范围，不再依赖固定 zoom。
     """
-    # 底图瓦片源（直接指定 URL，避免依赖 folium 内置名称匹配）
-    _TILES = {
-        "positron": (
-            "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-            "© OpenStreetMap contributors © CARTO",
-            "CartoDB Positron（浅色极简）",
-        ),
-        "voyager": (
-            "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
-            "© OpenStreetMap contributors © CARTO",
-            "CartoDB Voyager（浅色+地名/POI 标注）",
-        ),
-        "osm": (
-            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-            "© OpenStreetMap contributors",
-            "OpenStreetMap（彩色完整）",
-        ),
-    }
-    minx, miny, maxx, maxy = polygon.bounds  # lon/lat
+    # 栅格数组的真实地理范围（ImageOverlay 必须用同一范围映射，否则色面错位）
+    minx, miny = float(XI.min()), float(YI.min())
+    maxx, maxy = float(XI.max()), float(YI.max())
     center = [origin[0], origin[1]]
 
     url, attr, name = _TILES.get(basemap, _TILES["voyager"])
-    m = folium.Map(location=center, zoom_start=13, tiles=None)
+    m = folium.Map(location=center, tiles=None)
     folium.TileLayer(tiles=url, attr=attr, name=name, control=False).add_to(m)
+    m.fit_bounds([[polygon.bounds[1], polygon.bounds[0]],
+                  [polygon.bounds[3], polygon.bounds[2]]])
 
     valid = zz[~np.isnan(zz)]
     bands_meta = []  # (label, overlay_js_name, hex_color) 每个时间档一层，便于按档显隐
@@ -468,7 +483,11 @@ def render_map(
         vmax = max_minutes if max_minutes is not None else float(np.nanmax(zz))
         vmin = 0.0
         bounds = np.arange(vmin, vmax + interval, interval)
-        cmap = plt.get_cmap(cmap_name)
+        try:
+            cmap = matplotlib.colormaps[cmap_name]
+        except KeyError:
+            logger.warning("未知配色方案 %r，回退默认 YlOrRd", cmap_name)
+            cmap = matplotlib.colormaps["YlOrRd"]
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
         color = cmap(norm(zz))  # float rgba, 含 NaN 行
         for i in range(len(bounds) - 1):
