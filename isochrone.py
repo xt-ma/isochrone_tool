@@ -1198,13 +1198,23 @@ def load_config(path):
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _open_in_browser(path: str) -> None:
+    """用系统默认浏览器打开生成的 HTML；失败仅提示，不中断流程。"""
+    try:
+        webbrowser.open(Path(path).resolve().as_uri())
+    except Exception as e:
+        logger.info("无法自动打开浏览器（%s），请手动打开：%s", e, path)
+
+
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(description="开源等时圈绘制工具（无需 ArcGIS Pro）")
     p.add_argument("--config", help="JSON 配置：含 origin / aoi(或 polygon)")
     p.add_argument("--origin", nargs=2, type=float, metavar=("LON", "LAT"),
                    help="起点经度 纬度（百度坐标拾取器格式）")
     p.add_argument("--polygon", help="研究区多边形 JSON 文件：[[经度,纬度], ...]")
-    p.add_argument("--cell", type=float, default=0.0028, help="渔网边长(度)，默认0.0028≈100m")
+    p.add_argument("--cell", type=float, default=0.0028,
+                   help="渔网边长(度)，默认0.0028（约300米）")
     p.add_argument("--grid", type=float, default=0.0006, help="插值栅格边长(度)")
     p.add_argument("--out", default=None, help="输出 HTML 路径（默认与 config 同目录）")
     p.add_argument("--interval", type=float, default=5.0, help="等时圈分级间隔(分钟)")
@@ -1224,6 +1234,10 @@ def main():
                    help="指纹校验失败时跳过确认，直接覆盖已有数据继续（谨慎使用）")
     p.add_argument("--delay", type=float, default=3.0,
                    help="两次批量请求之间的间隔秒数(默认3.0)；频繁遇401并发超限可调大")
+    p.add_argument("--export-geojson", action="store_true",
+                   help="同时导出分级等时圈矢量 GeoJSON（与输出 HTML 同名、后缀 .geojson）")
+    p.add_argument("--open", action="store_true",
+                   help="出图完成后用系统默认浏览器打开结果 HTML")
     p.add_argument("--demo", action="store_true",
                    help="用模拟数据演示（不需要百度 AK）")
     args = p.parse_args()
@@ -1247,6 +1261,8 @@ def main():
         # config 中的 direction 优先于默认，命令行 --direction 可覆盖
         direction = cfg.get("direction", "from")
         origin_bd = tuple(cfg["origin"])  # 百度 BD-09 [经度, 纬度]
+        # config 里的 export_geojson 只有在 CLI 未显式给出时才生效
+        args.export_geojson = args.export_geojson or bool(cfg.get("export_geojson", False))
     elif args.origin and args.polygon:
         lng, lat = args.origin  # 命令行按百度拾取器顺序：经度 纬度
         origin = bd09_to_wgs84(lat, lng)
@@ -1277,9 +1293,11 @@ def main():
             origin, polygon, csv_path=args.csv, direction=direction,
             cell_deg=args.cell, grid_deg=args.grid, out_html=args.out,
             interval=args.interval, cmap_name=cmap, max_minutes=args.max_minutes,
-            basemap=basemap, force=args.force,
+            basemap=basemap, force=args.force, export_geojson=args.export_geojson,
         )
         logger.info("已从 %s 出图（方向=%s），打开 %s 查看", args.csv, direction, args.out)
+        if args.open:
+            _open_in_browser(args.out)
         return
 
     if args.demo:
@@ -1289,8 +1307,11 @@ def main():
             origin, polygon, gdf=gdf, cell_deg=args.cell, grid_deg=args.grid,
             out_html=args.out, interval=args.interval, cmap_name=cmap,
             max_minutes=args.max_minutes, basemap=basemap, direction=direction,
+            export_geojson=args.export_geojson,
         )
         logger.info("演示完成（模拟数据，方向=%s），打开 %s 查看", direction, args.out)
+        if args.open:
+            _open_in_browser(args.out)
         return
 
     run_pipeline(
@@ -1299,7 +1320,10 @@ def main():
         interval=args.interval, cmap_name=cmap, max_minutes=args.max_minutes,
         basemap=basemap, direction=direction,
         origin_bd=origin_bd, force=args.force, delay=args.delay,
+        export_geojson=args.export_geojson,
     )
+    if args.open:
+        _open_in_browser(args.out)
 
 
 if __name__ == "__main__":

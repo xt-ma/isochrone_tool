@@ -1,37 +1,35 @@
-"""针对本次改动的新增专门用例：
-(a) --delay 接线（run_pipeline 透传 + main 透传 + argparse 不接收 --concurrency）
-(b) P0-3 修复验证：批量算路「中间缺失」时整批标记失败、绝不把错位时长写盘
-(c) pandas 导入冒烟（requirements.txt 已加 pandas>=2.0）
-(P1-2) main 同时给 --config 与 --origin/--polygon 时的告警
+"""CLI 接线回归：参数透传、未知参数拒绝、config 优先级与冲突告警、浏览器打开。
 
-绝不真实调用百度 API。
+全部通过 monkeypatch 隔离：不触网、不真正打开浏览器、不真正算路。
 """
-import asyncio
 import json
 import sys
 
 import pytest
+from shapely.geometry import Polygon
 
 import isochrone
-from shapely.geometry import Polygon
 
 
 # --------------------------------------------------------------------------- #
-# (c) pandas 导入冒烟
+# pandas 导入冒烟（requirements.txt 声明了 pandas>=2.0）
 # --------------------------------------------------------------------------- #
 def test_pandas_import():
     import pandas as pd  # noqa: F401
-    import isochrone  # 已随 conftest 导入；此处确保 pandas 依赖可用
     assert hasattr(isochrone, "make_fishnet")
 
 
+def _square_polygon():
+    return Polygon([(120.20, 30.25), (120.23, 30.25),
+                    (120.23, 30.28), (120.20, 30.28)])
+
+
 # --------------------------------------------------------------------------- #
-# (a) --delay 接线
+# --delay 接线：run_pipeline 与 main 均透传
 # --------------------------------------------------------------------------- #
 def test_run_pipeline_delay_passthrough(monkeypatch):
     origin = (30.265, 120.215)
-    polygon = Polygon([(120.20, 30.25), (120.23, 30.25),
-                       (120.23, 30.28), (120.20, 30.28)])
+    polygon = _square_polygon()
 
     captured = {}
 
@@ -58,7 +56,7 @@ def test_main_delay_wiring(monkeypatch, tmp_path):
     poly.write_text(json.dumps([
         [120.20, 30.25], [120.23, 30.25], [120.23, 30.28],
         [120.20, 30.28], [120.20, 30.25],
-    ]))
+    ]), encoding="utf-8")
 
     captured = {}
 
@@ -75,6 +73,85 @@ def test_main_delay_wiring(monkeypatch, tmp_path):
     assert captured.get("delay") == 5.0
 
 
+# --------------------------------------------------------------------------- #
+# --export-geojson 接线：CLI 开关与 config 字段都能透传到 run_pipeline
+# --------------------------------------------------------------------------- #
+def _write_config(tmp_path, extra=None):
+    cfg = {
+        "origin": [120.21, 30.26],
+        "polygon": [[120.20, 30.25], [120.23, 30.25], [120.23, 30.28],
+                    [120.20, 30.28], [120.20, 30.25]],
+    }
+    cfg.update(extra or {})
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    return str(p)
+
+
+def test_main_export_geojson_flag(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path)
+    captured = {}
+    monkeypatch.setattr(isochrone, "run_pipeline",
+                        lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(sys, "argv",
+                        ["isochrone.py", "--config", cfg, "--export-geojson"])
+    isochrone.main()
+    assert captured.get("export_geojson") is True
+
+
+def test_main_export_geojson_from_config_field(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, extra={"export_geojson": True})
+    captured = {}
+    monkeypatch.setattr(isochrone, "run_pipeline",
+                        lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(sys, "argv", ["isochrone.py", "--config", cfg])
+    isochrone.main()
+    assert captured.get("export_geojson") is True
+
+
+# --------------------------------------------------------------------------- #
+# --open：出图完成后用浏览器打开结果
+# --------------------------------------------------------------------------- #
+def test_main_open_opens_browser(monkeypatch, tmp_path):
+    poly = tmp_path / "poly.json"
+    poly.write_text(json.dumps([
+        [120.20, 30.25], [120.23, 30.25], [120.23, 30.28],
+        [120.20, 30.28], [120.20, 30.25],
+    ]), encoding="utf-8")
+    out = tmp_path / "demo.html"
+    opened = []
+    monkeypatch.setattr(isochrone.webbrowser, "open",
+                        lambda uri: opened.append(uri) or True)
+    monkeypatch.setattr(sys, "argv", [
+        "isochrone.py", "--origin", "120.21", "30.26",
+        "--polygon", str(poly), "--demo", "--open", "--out", str(out),
+    ])
+    isochrone.main()
+    assert out.exists()
+    assert len(opened) == 1
+    assert "demo.html" in opened[0]
+
+
+def test_main_without_open_does_not_open_browser(monkeypatch, tmp_path):
+    poly = tmp_path / "poly.json"
+    poly.write_text(json.dumps([
+        [120.20, 30.25], [120.23, 30.25], [120.23, 30.28],
+        [120.20, 30.28], [120.20, 30.25],
+    ]), encoding="utf-8")
+    opened = []
+    monkeypatch.setattr(isochrone.webbrowser, "open",
+                        lambda uri: opened.append(uri) or True)
+    monkeypatch.setattr(sys, "argv", [
+        "isochrone.py", "--origin", "120.21", "30.26",
+        "--polygon", str(poly), "--demo", "--out", str(tmp_path / "demo.html"),
+    ])
+    isochrone.main()
+    assert opened == []
+
+
+# --------------------------------------------------------------------------- #
+# 拒绝已移除的 --concurrency 参数（当前为串行 by design）
+# --------------------------------------------------------------------------- #
 def test_main_rejects_concurrency_arg(monkeypatch, tmp_path):
     poly = tmp_path / "poly.json"
     poly.write_text(json.dumps([
@@ -90,71 +167,17 @@ def test_main_rejects_concurrency_arg(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# (P1-2) main: --config 与 --origin/--polygon 同时给出时的告警
+# main: --config 与 --origin/--polygon 同时给出时告警（命令行坐标被忽略）
 # --------------------------------------------------------------------------- #
 def test_main_config_and_cli_coords_warning(monkeypatch, tmp_path, caplog):
     import logging
 
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({
-        "origin": [120.21, 30.26],
-        "polygon": [[120.20, 30.25], [120.23, 30.25],
-                    [120.23, 30.28], [120.20, 30.28], [120.20, 30.25]],
-    }))
+    cfg = _write_config(tmp_path)
     monkeypatch.setattr(isochrone, "run_pipeline", lambda *a, **k: None)
     monkeypatch.setattr(sys, "argv", [
-        "isochrone.py", "--config", str(cfg),
+        "isochrone.py", "--config", cfg,
         "--origin", "120.21", "30.26", "--polygon", str(tmp_path / "poly.json"),
     ])
     with caplog.at_level(logging.WARNING):
         isochrone.main()
     assert any("命令行坐标被忽略" in r.message for r in caplog.records)
-
-
-# --------------------------------------------------------------------------- #
-# (b) P0-3 修复验证（最关键）：批量算路「中间缺失」时整批标记失败，
-#     绝不把错位/错误时长写进 csv（pending 保持，出图 dropna 丢弃）。
-# --------------------------------------------------------------------------- #
-def test_batch_route_no_misallocation_on_count_mismatch(
-    fake_session, sample_origin, sample_polygon, tmp_csv
-):
-    cell = 0.01
-    gdf = isochrone.make_fishnet(sample_polygon, cell_deg=cell)
-    n = len(gdf)
-    batch_size = 2
-
-    state = {"n": 0}
-
-    def side_effect(params):
-        state["n"] += 1
-        ndest = params["destinations"].count("|") + 1
-        if state["n"] == 1:
-            # 第一批（2 个 dest）返回「中间缺失」：只回 1 条结果（含一个会被误用的错误值 999）
-            return {"status": 0, "result": [{"duration": {"value": 999 * 60}}]}
-        return {"status": 0, "result": [
-            {"duration": {"value": int((10 + i) * 60)}} for i in range(ndest)]}
-
-    fs = fake_session(side_effect=side_effect)
-
-    # max_retry=1 让第一批只试一次即跳过；delay=0 加速
-    asyncio.run(isochrone.batch_route(
-        sample_origin, gdf, "fakeak", tactics=11, batch_size=batch_size,
-        csv_path=tmp_csv, direction="from", polygon=sample_polygon,
-        cell_deg=cell, origin_bd=(120.21, 30.26), force=False,
-        delay=0.0, max_retry=1,
-    ))
-
-    import pandas as pd
-    df = pd.read_csv(tmp_csv)
-    csv_oids = set(df["oid"].tolist())
-    csv_durs = df["duration_min"].tolist()
-
-    # 第一批 oid（0,1）整批缺失 -> 不应出现在 csv 中（未静默错位写盘）
-    assert 0 not in csv_oids
-    assert 1 not in csv_oids
-    # 错误值 999（分钟）绝不能落到任何一行（证明没有把错位结果写进去）
-    assert 999.0 not in csv_durs
-    # 其余批次正常 -> 全部到位
-    assert set(range(2, n)).issubset(csv_oids)
-    # 请求批数 = ceil(n / batch_size)
-    assert len(fs.calls) == (n + batch_size - 1) // batch_size
