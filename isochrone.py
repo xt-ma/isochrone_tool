@@ -157,6 +157,40 @@ def make_fishnet(polygon: Polygon, cell_deg: float = 0.0028, offset: float = 0.0
 # --------------------------------------------------------------------------- #
 # 2) 百度批量算路（替代原文 asyncio 请求段，支持断点续跑）
 # --------------------------------------------------------------------------- #
+def _confirm_or_exit(prompt: str, force: bool, cancel_msg: str) -> None:
+    """危险操作（指纹不匹配时覆盖数据 / 错配出图）的统一确认入口。
+
+    force=True 跳过询问直接放行；交互回答 y/yes/是 放行；其余（含非交互
+    环境的 EOFError）视为取消，抛 SystemExit(cancel_msg)。
+    """
+    if force:
+        return
+    try:
+        ans = input(prompt)
+    except EOFError:
+        ans = ""
+    if ans.strip().lower() not in ("y", "yes", "是"):
+        raise SystemExit(cancel_msg)
+
+
+def _atomic_write_csv(csv_p: Path, rows: list[dict]) -> None:
+    """csv 增量落盘：写临时文件后 os.replace 原子替换，进程中断不会留下半截文件。
+
+    rows 为空时不写（避免把已有好数据覆盖成空文件）。
+    """
+    if not rows:
+        return
+    tmp = csv_p.with_name(csv_p.name + ".tmp")
+    pd.DataFrame(rows).to_csv(tmp, index=False)
+    os.replace(tmp, csv_p)
+
+
+def _atomic_write_meta(csv_p: Path, meta: dict) -> None:
+    tmp = csv_p.with_suffix(".meta.json.tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, csv_p.with_suffix(".meta.json"))
+
+
 async def _fetch_batch(session, sem, origin, dests, ak, tactics, direction="from"):
     """一次请求算 origin <-> 多个 dest 的驾驶时间（批量，省配额）。坐标统一 WGS84。
 
@@ -246,6 +280,7 @@ async def batch_route(
     cell_deg: float = 0.0028,
     origin_bd=None,
     force: bool = False,
+    max_failed_batches: int = 3,
 ):
     """
     异步批量调用百度 routematrix，返回 {oid: duration_min}。
@@ -253,8 +288,12 @@ async def batch_route(
     - 每批 batch_size 个终点一次请求（远少于原文的 1 点 1 请求，省配额）。
     - tactics 默认 11（常规路线，考虑实时路况）；注意 13=距离较短(不考虑路况)，
       本项目刻意不用 13，以保证等时圈反映真实拥堵。
-    - 即时落盘 csv，失败可续。并发默认 1、间隔默认 3.0s，对齐百度免费版 1/3 QPS
-      （每约 3 秒 1 次）；若 AK 配额更高可下调 delay，频繁出现 401 并发超限则应上调。
+    - 即时原子落盘 csv（写临时文件后 os.replace），失败可续。并发默认 1、
+      间隔默认 3.0s，对齐百度免费版 1/3 QPS（每约 3 秒 1 次）；若 AK 配额更高
+      可下调 delay，频繁出现 401 并发超限则应上调。
+    - 连续失败熔断：连续 max_failed_batches 批「整批全失败」（每批已重试
+      max_retry 次）则中止并给出排查建议——AK 配置错误时不必空跑完全部批次；
+      已落盘数据不受影响，修复后重跑同一命令即可续算。
     - direction="from"（默认）：算「从 origin 出发」；direction="to"：算「到达 origin」。
       二者在百度驾车模型下结果不同（受单行/转向限制），故 csv 缓存按 direction 分别
       存储，方向切换不会互相覆盖或误用。
@@ -276,22 +315,15 @@ async def batch_route(
             except Exception:
                 meta = {}
             if meta.get("fingerprint") != fp:
-                if not force:
-                    ans = ""
-                    try:
-                        ans = input(
-                            f"\n[确认] 已有 {csv_p.name} 的参数指纹与当前配置不一致"
-                            f"（旧={meta.get('fingerprint')} 当前={fp}）。\n"
-                            f"  说明：origin / 研究区 / 网格 / 驾车策略 中至少有一项变了，"
-                            f"旧时长已无法对应到正确坐标。\n"
-                            f"  继续将【覆盖】该 csv 并重新算路（旧数据不可恢复）。确认覆盖？(y/N): "
-                        )
-                    except EOFError:
-                        ans = ""
-                    if ans.strip().lower() not in ("y", "yes", "是"):
-                        raise SystemExit(
-                            "已取消运行：未修改任何数据。用 --force 可跳过确认直接覆盖。"
-                        )
+                _confirm_or_exit(
+                    f"\n[确认] 已有 {csv_p.name} 的参数指纹与当前配置不一致"
+                    f"（旧={meta.get('fingerprint')} 当前={fp}）。\n"
+                    f"  说明：origin / 研究区 / 网格 / 驾车策略 中至少有一项变了，"
+                    f"旧时长已无法对应到正确坐标。\n"
+                    f"  继续将【覆盖】该 csv 并重新算路（旧数据不可恢复）。确认覆盖？(y/N): ",
+                    force=force,
+                    cancel_msg="已取消运行：未修改任何数据。用 --force 可跳过确认直接覆盖。",
+                )
                 logger.warning("指纹不匹配，按指示覆盖旧数据并重新算路。")
                 csv_p.unlink(missing_ok=True)
                 meta_p.unlink(missing_ok=True)
@@ -317,6 +349,17 @@ async def batch_route(
         bd_lat, bd_lng = wgs84_to_bd09(r.lat, r.lon)  # 返回 (bd_lat, bd_lng)
         grid_bd[int(r.oid)] = (round(bd_lng, 6), round(bd_lat, 6))
 
+    # 参数指纹元数据：内容在整个算路过程中不变，先算好、每批随 csv 一并落盘
+    meta_out = None
+    if polygon is not None:
+        meta_out = {
+            "fingerprint": _config_fingerprint(origin, polygon, cell_deg, tactics),
+            "cell_deg": cell_deg,
+            "tactics": tactics,
+            "origin_bd": list(origin_bd) if origin_bd else None,
+            "polygon_wkt": polygon.wkt,
+        }
+
     pending = [
         (int(r.oid), (r.lat, r.lon))
         for r in gdf.itertuples()
@@ -326,16 +369,18 @@ async def batch_route(
     if not pending:
         return done
 
+    chunks = [pending[s : s + batch_size] for s in range(0, len(pending), batch_size)]
+    failed_streak = 0
     sem = asyncio.Semaphore(concurrency)
     connector = aiohttp.TCPConnector(limit=concurrency)
     async with aiohttp.ClientSession(connector=connector) as session:
-        for start in range(0, len(pending), batch_size):
-            chunk = pending[start : start + batch_size]
+        bar = tqdm(total=len(chunks), desc=f"批量算路({direction})", unit="批")
+        for i_chunk, chunk in enumerate(chunks):
             oids = [o for o, _ in chunk]
             dests = [d for _, d in chunk]
             durations = None
             last_status = 0
-            for attempt in range(max_retry):
+            for _ in range(max_retry):
                 durations, last_status, _ = await _fetch_batch(
                     session, sem, origin, dests, ak, tactics, direction
                 )
@@ -343,11 +388,16 @@ async def batch_route(
                     break
                 # 并发类错误(401)退避更久，其余 1 秒后重试
                 await asyncio.sleep(5.0 if last_status == 401 else 1.0)
+            # 「整批全失败」才计入熔断：部分缺失只丢个别点，不阻断整体
+            if all(d is None for d in durations):
+                failed_streak += 1
+            else:
+                failed_streak = 0
             for oid, dur in zip(oids, durations):
                 if dur is not None:
                     done[oid] = round(dur, 1)
                     all_done[(oid, direction)] = round(dur, 1)
-            # 增量落盘（保留其它方向的缓存），并记录两端百度坐标便于核对
+            # 增量原子落盘（保留其它方向的缓存），并记录两端百度坐标便于核对
             rows = []
             for (k, d), v in sorted(all_done.items()):
                 glng, glat = grid_bd.get(k, (None, None))
@@ -360,29 +410,23 @@ async def batch_route(
                     "dest_lng": glng,
                     "dest_lat": glat,
                 })
-            pd.DataFrame(rows).to_csv(csv_p, index=False)
-            # 同时写参数指纹，供续跑 / 离线出图校验 oid 对齐
-            if polygon is not None:
-                csv_p.with_suffix(".meta.json").write_text(
-                    json.dumps(
-                        {
-                            "fingerprint": _config_fingerprint(origin, polygon, cell_deg, tactics),
-                            "cell_deg": cell_deg,
-                            "tactics": tactics,
-                            "origin_bd": list(origin_bd) if origin_bd else None,
-                            "polygon_wkt": polygon.wkt,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
+            _atomic_write_csv(csv_p, rows)
+            if meta_out is not None:
+                _atomic_write_meta(csv_p, meta_out)
+            bar.update(1)
+            bar.set_postfix(有效点=len(done))
+            if failed_streak >= max_failed_batches:
+                bar.close()
+                raise RuntimeError(
+                    f"连续 {failed_streak} 批算路整批失败（每批已重试 {max_retry} 次），已熔断中止。\n"
+                    f"  当前累计有效采样点 {len(done)} 个；已算好的数据仍保存在 {csv_p.name}，"
+                    f"排查并修复后重跑同一命令即可断点续算。\n"
+                    f"  常见原因（按上方 '百度返回错误 status=...' 的 WARNING 日志定位）：\n"
+                    f"{_AK_TROUBLESHOOT}"
                 )
-            logger.info(
-                "进度 %d/%d（累计 %d 个有效）",
-                min(start + batch_size, len(pending)),
-                len(pending),
-                len(done),
-            )
-            await asyncio.sleep(delay)
+            if i_chunk < len(chunks) - 1:  # 最后一批之后不必再等
+                await asyncio.sleep(delay)
+        bar.close()
     return done
 
 
