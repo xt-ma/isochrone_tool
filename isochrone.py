@@ -949,42 +949,10 @@ def _transform_lng(lng, lat):
     return ret
 
 
-def _bd09_to_wgs84_raw(lng, lat):
-    """wandergis/coordtransform 标准实现 BD-09 -> WGS84，入参 (lng, lat)。"""
-    # 1) BD-09 -> GCJ-02
-    x = lng - 0.0065
-    y = lat - 0.006
-    z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * math.pi)
-    theta = math.atan2(y, x) - 0.000003 * math.cos(x * math.pi)
-    gg_lng = z * math.cos(theta)
-    gg_lat = z * math.sin(theta)
-    # 2) GCJ-02 -> WGS84
-    if not (73.66 < gg_lng < 135.05 and 3.86 < gg_lat < 53.55):
-        return gg_lng, gg_lat  # 境外不纠偏
-    dlat = _transform_lat(gg_lng - 105.0, gg_lat - 35.0)
-    dlng = _transform_lng(gg_lng - 105.0, gg_lat - 35.0)
-    radlat = gg_lat / 180.0 * math.pi
-    magic = math.sin(radlat)
-    magic = 1 - 0.00669342162296594323 * magic * magic
-    sqrtmagic = math.sqrt(magic)
-    dlat = (dlat * 180.0) / ((6378245.0 * (1 - 0.00669342162296594323))
-                             / (magic * sqrtmagic) * math.pi)
-    dlng = (dlng * 180.0) / (6378245.0 / sqrtmagic
-                             * math.cos(radlat) * math.pi)
-    return gg_lng - dlng, gg_lat - dlat
-
-
-def bd09_to_wgs84(lat, lon):
-    """百度 BD-09 坐标 -> WGS84（GPS 标准）。入参/返回均为 (lat, lon)。"""
-    wgs_lng, wgs_lat = _bd09_to_wgs84_raw(lon, lat)
-    return wgs_lat, wgs_lng
-
-
-def wgs84_to_bd09(lat, lng):
-    """WGS84 -> 百度 BD-09。入参/返回均为 (lat, lng)。供 picker 等将 OSM 坐标转百度格式。"""
-    # 1) WGS84 -> GCJ-02
+def _wgs84_to_gcj02(lng, lat):
+    """WGS84 -> GCJ-02（火星坐标）。入参/返回均为 (lng, lat)；境外原样返回。"""
     if not (3.86 < lat < 53.55 and 73.66 < lng < 135.05):
-        return lat, lng  # 境外不纠偏
+        return lng, lat  # 境外不纠偏
     dlat = _transform_lat(lng - 105.0, lat - 35.0)
     dlng = _transform_lng(lng - 105.0, lat - 35.0)
     radlat = lat / 180.0 * math.pi
@@ -995,15 +963,62 @@ def wgs84_to_bd09(lat, lng):
                              / (magic * sqrtmagic) * math.pi)
     dlng = (dlng * 180.0) / (6378245.0 / sqrtmagic
                              * math.cos(radlat) * math.pi)
-    gcj_lat = lat + dlat
-    gcj_lng = lng + dlng
-    # 2) GCJ-02 -> BD-09
-    x = gcj_lng
-    y = gcj_lat
+    return lng + dlng, lat + dlat
+
+
+def _gcj02_to_wgs84(lng, lat):
+    """GCJ-02 -> WGS84（wandergis/coordtransform 标准的近似逆变换）。
+    入参/返回均为 (lng, lat)；境外原样返回。"""
+    if not (73.66 < lng < 135.05 and 3.86 < lat < 53.55):
+        return lng, lat  # 境外不纠偏
+    dlat = _transform_lat(lng - 105.0, lat - 35.0)
+    dlng = _transform_lng(lng - 105.0, lat - 35.0)
+    radlat = lat / 180.0 * math.pi
+    magic = math.sin(radlat)
+    magic = 1 - 0.00669342162296594323 * magic * magic
+    sqrtmagic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((6378245.0 * (1 - 0.00669342162296594323))
+                             / (magic * sqrtmagic) * math.pi)
+    dlng = (dlng * 180.0) / (6378245.0 / sqrtmagic
+                             * math.cos(radlat) * math.pi)
+    return lng - dlng, lat - dlat
+
+
+def _gcj02_to_bd09(lng, lat):
+    """GCJ-02 -> BD-09。入参/返回均为 (lng, lat)。"""
+    x, y = lng, lat
     z = math.sqrt(x * x + y * y) + 0.00002 * math.sin(y * math.pi)
     theta = math.atan2(y, x) + 0.000003 * math.cos(x * math.pi)
-    bd_lat = z * math.sin(theta) + 0.006
-    bd_lng = z * math.cos(theta) + 0.0065
+    return z * math.cos(theta) + 0.0065, z * math.sin(theta) + 0.006
+
+
+def _bd09_to_gcj02(lng, lat):
+    """BD-09 -> GCJ-02。入参/返回均为 (lng, lat)。"""
+    x = lng - 0.0065
+    y = lat - 0.006
+    z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * math.pi)
+    theta = math.atan2(y, x) - 0.000003 * math.cos(x * math.pi)
+    return z * math.cos(theta), z * math.sin(theta)
+
+
+def _bd09_to_wgs84_raw(lng, lat):
+    """wandergis/coordtransform 标准实现 BD-09 -> WGS84，入参 (lng, lat)。"""
+    gg_lng, gg_lat = _bd09_to_gcj02(lng, lat)
+    return _gcj02_to_wgs84(gg_lng, gg_lat)
+
+
+def bd09_to_wgs84(lat, lon):
+    """百度 BD-09 坐标 -> WGS84（GPS 标准）。入参/返回均为 (lat, lon)。"""
+    wgs_lng, wgs_lat = _bd09_to_wgs84_raw(lon, lat)
+    return wgs_lat, wgs_lng
+
+
+def wgs84_to_bd09(lat, lng):
+    """WGS84 -> 百度 BD-09。入参/返回均为 (lat, lng)。供 picker 等将 OSM 坐标转百度格式。"""
+    if not (3.86 < lat < 53.55 and 73.66 < lng < 135.05):
+        return lat, lng  # 境外不纠偏（BD-09 偏移也一并跳过，保持坐标原样）
+    gcj_lng, gcj_lat = _wgs84_to_gcj02(lng, lat)
+    bd_lng, bd_lat = _gcj02_to_bd09(gcj_lng, gcj_lat)
     return bd_lat, bd_lng
 
 
