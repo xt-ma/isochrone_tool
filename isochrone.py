@@ -906,6 +906,7 @@ def build_from_csv(
     max_minutes=None,
     basemap: str = "voyager",
     force: bool = False,
+    export_geojson: bool = False,
 ):
     """从已有的 durations.csv 直接出图，不再调用百度算路。
 
@@ -921,6 +922,8 @@ def build_from_csv(
     注意：csv 的 oid 必须与「当前 polygon + cell_deg 生成的渔网」一致才能对齐——
     durations.csv 本就是用同一套参数生成的，故默认一致；若换了研究区或 cell_deg
     则 oid 不匹配，会大量丢点。方向写反（拿 from 的 csv 用 to 出图）也会丢点。
+    指纹与当前配置不一致时交互询问（与算路模式同一确认入口），默认取消；
+    回答 y 或加 --force 才继续（结果可能不准确）。
     """
     gdf_raw = make_fishnet(polygon, cell_deg=cell_deg)
     n_total = len(gdf_raw)
@@ -941,16 +944,19 @@ def build_from_csv(
     fp_tactics = meta.get("tactics", 11)
     fp = _config_fingerprint(origin, polygon, cell_deg, fp_tactics)
     if "fingerprint" in meta and meta.get("fingerprint") != fp:
-        if not force:
-            raise RuntimeError(
-                f"durations.csv 的参数指纹与当前配置不一致"
-                f"（旧={meta.get('fingerprint')} 当前={fp}）。\n"
-                f"  该 csv 是用另一套 origin/研究区/网格/策略生成的，oid 无法对齐；"
-                f"强行出图会把旧时长错配到新坐标。\n"
-                f"  解决：使用生成该 csv 时的同一 config，或换 --csv 指向正确的数据文件；"
-                f"若确认要冒险出图，可加 --force。"
-            )
-        logger.warning("指纹不匹配，但 --force 已指定，仍按当前配置出图（结果可能不准确）。")
+        _confirm_or_exit(
+            f"\n[确认] {Path(csv_path).name} 的参数指纹与当前配置不一致"
+            f"（旧={meta.get('fingerprint')} 当前={fp}）。\n"
+            f"  说明：该 csv 是用另一套 origin/研究区/网格/策略生成的，oid 可能无法对齐；"
+            f"按当前配置出图会把旧时长错配到新坐标（得到错误但看似正常的地图）。\n"
+            f"  仍要继续出图？(y/N): ",
+            force=force,
+            cancel_msg=(
+                "已取消出图：未修改任何数据。请使用生成该 csv 时的同一 config，"
+                "或换 --csv 指向正确的数据文件；也可加 --force 跳过确认强行出图。"
+            ),
+        )
+        logger.warning("指纹不匹配，已按确认改为按当前配置出图（结果可能不准确）。")
     elif not meta:
         logger.warning(
             "durations.csv 无指纹信息（旧格式），无法校验研究区是否一致；"
@@ -993,6 +999,7 @@ def build_from_csv(
         origin, polygon, gdf=gdf, cell_deg=cell_deg, grid_deg=grid_deg,
         out_html=out_html, interval=interval, cmap_name=cmap_name,
         max_minutes=max_minutes, basemap=basemap, direction=direction,
+        export_geojson=export_geojson,
     )
     return gdf
 
