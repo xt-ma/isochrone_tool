@@ -473,11 +473,12 @@ def idw_grid(gdf, grid_deg: float = 0.0006, power: float = 2.0, k: int = 12):
 
 
 def mask_by_polygon(XI, YI, zz, polygon):
-    """用研究区多边形把栅格裁剪到区内（替代 arcpy Clip）。"""
-    path = mpath.Path(np.array(polygon.exterior.coords))
-    inside = path.contains_points(
-        np.column_stack([XI.ravel(), YI.ravel()])
-    ).reshape(XI.shape)
+    """用研究区多边形把栅格裁剪到区内（替代 arcpy Clip）。
+
+    用 shapely 的向量化 contains_xy 做点判定：与 make_fishnet 的
+    polygon.contains 同一语义，多边形带洞时洞内一并置为 NaN。
+    """
+    inside = contains_xy(polygon, XI.ravel(), YI.ravel()).reshape(XI.shape)
     return np.where(inside, zz, np.nan)
 
 
